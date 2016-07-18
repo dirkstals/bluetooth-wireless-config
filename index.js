@@ -14,6 +14,10 @@
  
 // Using the bleno module
 var bleno = require('bleno');
+
+var ip = require('ip');
+
+var network = {};
  
 // Once bleno starts, begin advertising our BLE address
 bleno.on('stateChange', function(state) {
@@ -72,6 +76,7 @@ bleno.on('advertisingStart', function(error) {
                         // Send a message back to the client with the characteristic's value
                         onReadRequest : function(offset, callback) {
                             console.log("Read request received");
+                            console.log(wireless.list());
                             callback(this.RESULT_SUCCESS, new Buffer("Echo: " + 
                                     (this.value ? this.value.toString("utf-8") : "")));
                         },
@@ -81,6 +86,34 @@ bleno.on('advertisingStart', function(error) {
                             this.value = data;
                             console.log('Write request: value = ' + this.value.toString("utf-8"));
                             callback(this.RESULT_SUCCESS);
+
+                            network = JSON.parse(data.value.toString("utf-8"));
+
+                            this.value = network.ssid;
+
+                            wireless.join(network.ssid, network.pwd, function(err) {
+                                if (err) {
+                                    console.log("[   ERROR] Unable to connect.");
+                                    return;
+                                }
+
+                                console.log("Yay, we connected! I will try to get an IP.");
+                                wireless.dhcp(function(ip_address) {
+
+                                    this.value = ip_address;
+                                    console.log("Yay, I got an IP address (" + ip_address + ")! I'm going to disconnect in 20 seconds.");
+
+                                    setTimeout(function() {
+                                        console.log("20 seconds are up! Attempting to turn off DHCP...");
+
+                                        wireless.dhcpStop(function() {
+                                            console.log("DHCP has been turned off. Leaving the network...");
+
+                                            wireless.leave();
+                                        });
+                                    }, 20 * 1000);
+                                });
+                            });
                         }
  
                     })
@@ -96,15 +129,10 @@ var fs = require('fs');
 
 var connected = false;
 var SSID = 'Stable';
-var wireless = new Wireless({
-    iface: 'wlan0',
-    updateFrequency: 10, // Optional, seconds to scan for networks
-    connectionSpyFrequency: 2, // Optional, seconds to scan if connected
-    vanishThreshold: 2 // Optional, how many scans before network considered gone
-});
+var wireless = new Wireless({iface: 'wlan0'});
 
 wireless.enable(function(err) {
-    wireless.start();
+    //wireless.start();
 });
 
 
@@ -204,3 +232,24 @@ wireless.on('empty', function() {
 wireless.on('error', function(message) {
     console.log("[   ERROR] " + message);
 });
+
+var connected = new Promise(function(resolve, reject){
+    require('dns').lookup('google.com', function(error) {
+        if(error && error.code == "ENOTFOUND"){
+            reject();
+        }else{
+            resolve();
+        }
+    })
+});
+
+// example usage:
+connected.then(function(){
+        console.log(ip.address());
+    }, 
+    function(){
+        console.log("whaaaat?");
+        // start bleno
+    }
+);
+
