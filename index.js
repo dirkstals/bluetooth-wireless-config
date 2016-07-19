@@ -1,255 +1,276 @@
+// https://support.google.com/chrome/answer/6239299?hl=en
+
+var bleno       = require('bleno'),
+    Wireless    = require('wireless'),
+    dns         = require('dns'),
+    util        = require('util'),
+    beacon      = require('eddystone-beacon');
+
+var network,
+    ipAddress,
+    wireless,
+    connected,
+    primaryService,
+    networkBuffer;
+    
+var DEVICE_NAME = 'My Device',
+    UUID = 'a463a2679afe41e8986ed38aeadfa226',
+    CUUID = 'a463a2679afe41e8986ed38aeadfa227',
+    IFACE = 'wlan0',
+    URL = 'https://www.google.com';
+
+
 /**
- * Simple bleno echo server
- * Author: Shawn Hymel
- * Date: November 22, 2015
- *
- * Creates a Bluetooth Low Energy device using bleno and offers one service
- * with one characteristic. Users can use a BLE test app to read, write, and
- * subscribe to that characteristic. Writing changes the characteristic's
- * value, reading returns that value, and subscribing results in a string
- * message every 1 second.
- *
- * This example is Beerware (https://en.wikipedia.org/wiki/Beerware).
+ * @function _init
+ * @private
  */
- 
-// Using the bleno module
-var bleno = require('bleno');
+var _init = function(){
 
-var ip = require('ip');
+    ipAddress = '';
+    wireless = new Wireless({iface: IFACE});
+    wireless.on('appear', _updateWirelessList);
+    wireless.on('vanish', _updateWirelessList);
+    wireless.on('join', _stopWirelessScan);
+    wireless.on('former', _stopWirelessScan);
+    wireless.on('leave', _startWirelessScan)
 
-var network = {};
- 
-// Once bleno starts, begin advertising our BLE address
-bleno.on('stateChange', function(state) {
-    console.log('State change: ' + state);
-    if (state === 'poweredOn') {
-        bleno.startAdvertising('MyDevice',['12ab']);
-    } else {
-        bleno.stopAdvertising();
+    // Just for debugging purposes
+    wireless.on('command', function(command) {
+        console.log("[ COMMAND] " + command);
+    });
+
+    wireless.on('error', function(message) {
+        console.log("[   ERROR] " + message);
+    });
+
+    
+    connected = new Promise(_dnsLookup);
+    connected.then(_onlineHandler, _offlineHandler);
+
+
+    bleno.on('advertisingStart', _advertisingStartHandler);
+    bleno.on('stateChange', function(state) {
+
+        if (state === 'poweredOn') {
+
+            console.log("[PROGRESS] Starting bluetooth advertising ...");
+
+            bleno.startAdvertising(DEVICE_NAME,[UUID]);
+            beacon.advertiseUrl(URL, {name: DEVICE_NAME});
+        } else {
+
+            if (state === 'unsupported'){
+
+                console.log("BLE and Bleno configurations not enabled on board");
+            }
+
+            console.log("[ FAILURE] Unable to enable bluetooth: " + state);
+
+            bleno.stopAdvertising();
+        }
+    });
+};
+
+
+
+/**
+ * @function _updateWirelessList
+ * @private
+ */
+var _updateWirelessList = function(network){
+    
+    networkBuffer = new Buffer(JSON.stringify(wireless.list()));
+};
+
+
+/**
+ * @function _startWirelessScan
+ * @private
+ */
+var _startWirelessScan = function(){
+
+    console.log("[PROGRESS] Start scanning...");
+
+    wireless.enable(function(error) {
+
+        if (error) {
+            console.log("[ FAILURE] Unable to enable wireless card.");
+            return;
+        }
+
+        console.log("[PROGRESS] Wireless card enabled.");
+        console.log("[PROGRESS] Starting wireless scan...");
+
+        wireless.start();
+    });
+}
+
+
+/**
+ * @function _stopWirelessScan
+ * @private
+ */
+var _stopWirelessScan = function(){
+    
+    console.log("[PROGRESS] Stop scanning...");
+
+    wireless.stop();
+}
+
+
+
+var WirelessCharacteristic = new bleno.Characteristic({
+    value : null,
+    uuid : CUUID,
+    properties : ['read', 'write'],
+    
+    // Send a message back to the client with the characteristic's value
+    onReadRequest : function(offset, callback) {
+        
+        console.log("Read request received");
+
+        if(offset > networkBuffer.length) {
+
+            callback(this.RESULT_INVALID_OFFSET);
+        } else {
+
+            callback(this.RESULT_SUCCESS, networkBuffer.slice(offset));
+        }
+    },
+    
+    // Accept a new value for the characterstic's value
+    onWriteRequest : function(data, offset, withoutResponse, callback) {
+
+        if(offset > 0) {
+
+            callback(this.RESULT_INVALID_OFFSET);
+            return;
+        } else {
+
+            network = JSON.parse(data.toString("utf-8"));
+
+            this.value = network.ssid;
+            callback(this.RESULT_SUCCESS);
+
+            wireless.join(network.ssid, network.pwd, _joinWirelessNetworkHandler);
+        }
     }
-});
- 
-// Notify the console that we've accepted a connection
-bleno.on('accept', function(clientAddress) {
-    console.log("Accepted connection from address: " + clientAddress);
-});
- 
-// Notify the console that we have disconnected from a client
-bleno.on('disconnect', function(clientAddress) {
-    console.log("Disconnected from address: " + clientAddress);
-});
- 
-// When we begin advertising, create a new service and characteristic
-bleno.on('advertisingStart', function(error) {
+
+})
+
+
+
+/**
+ * @function _dnsLookup
+ * @private
+ */
+var _dnsLookup = function(resolve, reject){
+
+    dns.lookup('google.com', function(error) {
+
+        if(error && error.code == "ENOTFOUND"){
+
+            reject();
+        }else{
+
+            resolve();
+        }
+    });
+};
+
+
+
+/**
+ * @function _onlineHandler
+ * @private
+ */
+var _onlineHandler = function(){
+
+    _stopWirelessScan();
+}
+
+
+/**
+ * @function _offlineHandler
+ * @private
+ */
+var _offlineHandler = function(){
+
+    _startWirelessScan();
+}
+
+
+
+/**
+ * @function _advertisingStartHandler
+ * @private
+ */
+var _advertisingStartHandler = function(error) {
+
     if (error) {
+
         console.log("Advertising start error:" + error);
     } else {
+
         console.log("Advertising start success");
+
         bleno.setServices([
             
             // Define a new service
             new bleno.PrimaryService({
-                uuid : '12ab',
+                uuid : UUID,
                 characteristics : [
                     
-                    // Define a new characteristic within that service
-                    new bleno.Characteristic({
-                        value : null,
-                        uuid : '34cd',
-                        properties : ['notify', 'read', 'write'],
-                        
-                        // If the client subscribes, we send out a message every 1 second
-                        onSubscribe : function(maxValueSize, updateValueCallback) {
-                            console.log("Device subscribed");
-                            this.intervalId = setInterval(function() {
-                                console.log("Sending: Hi!");
-                                updateValueCallback(new Buffer("Hi!"));
-                            }, 1000);
-                        },
-                        
-                        // If the client unsubscribes, we stop broadcasting the message
-                        onUnsubscribe : function() {
-                            console.log("Device unsubscribed");
-                            clearInterval(this.intervalId);
-                        },
-                        
-                        // Send a message back to the client with the characteristic's value
-                        onReadRequest : function(offset, callback) {
-                            console.log("Read request received");
-                            console.log(wireless.list());
-                            callback(this.RESULT_SUCCESS, new Buffer("Echo: " + 
-                                    (this.value ? this.value.toString("utf-8") : "")));
-                        },
-                        
-                        // Accept a new value for the characterstic's value
-                        onWriteRequest : function(data, offset, withoutResponse, callback) {
-                            this.value = data;
-                            console.log('Write request: value = ' + this.value.toString("utf-8"));
-                            callback(this.RESULT_SUCCESS);
-
-                            network = JSON.parse(data.value.toString("utf-8"));
-
-                            this.value = network.ssid;
-
-                            wireless.join(network.ssid, network.pwd, function(err) {
-                                if (err) {
-                                    console.log("[   ERROR] Unable to connect.");
-                                    return;
-                                }
-
-                                console.log("Yay, we connected! I will try to get an IP.");
-                                wireless.dhcp(function(ip_address) {
-
-                                    this.value = ip_address;
-                                    console.log("Yay, I got an IP address (" + ip_address + ")! I'm going to disconnect in 20 seconds.");
-
-                                    setTimeout(function() {
-                                        console.log("20 seconds are up! Attempting to turn off DHCP...");
-
-                                        wireless.dhcpStop(function() {
-                                            console.log("DHCP has been turned off. Leaving the network...");
-
-                                            wireless.leave();
-                                        });
-                                    }, 20 * 1000);
-                                });
-                            });
-                        }
- 
-                    })
+                    
                     
                 ]
             })
         ]);
     }
-});
+};
 
-var Wireless = require('wireless');
-var fs = require('fs');
+/**
+ * @function _joinWirelessNetworkHandler
+ * @private
+ */
+var _joinWirelessNetworkHandler = function(err) {
 
-var connected = false;
-var SSID = 'Stable';
-var wireless = new Wireless({iface: 'wlan0'});
-
-wireless.enable(function(err) {
-    //wireless.start();
-});
-
-
-// Found a new network
-wireless.on('appear', function(network) {
-    var quality = Math.floor(network.quality / 70 * 100);
-
-    var ssid = network.ssid || '<HIDDEN>';
-
-    var encryption_type = 'NONE';
-    if (network.encryption_wep) {
-        encryption_type = 'WEP';
-    } else if (network.encryption_wpa && network.encryption_wpa2) {
-        encryption_type = 'WPA&WPA2';
-    } else if (network.encryption_wpa) {
-        encryption_type = 'WPA';
-    } else if (network.encryption_wpa2) {
-        encryption_type = 'WPA2';
+    if (err) {
+        console.log("[   ERROR] Unable to connect.");
+        return;
     }
 
-    console.log("[  APPEAR] " + ssid + " [" + network.address + "] " + quality + "% " + network.strength + " dBm " + encryption_type);
+    console.log("Yay, we connected! I will try to get an IP.");
 
-    if (!connected && network.ssid === SSID) {
-        connected = true;
-        wireless.join(network, '', function(err) {
-            if (err) {
-                console.log("[   ERROR] Unable to connect.");
-                return;
-            }
+    wireless.dhcp(function(ip_address) {
 
-            console.log("Yay, we connected! I will try to get an IP.");
-            wireless.dhcp(function(ip_address) {
-                console.log("Yay, I got an IP address (" + ip_address + ")! I'm going to disconnect in 20 seconds.");
+        console.log("Yay, I got an IP address (" + ipAddress + ")!");
+    });
+};
 
-                setTimeout(function() {
-                    console.log("20 seconds are up! Attempting to turn off DHCP...");
 
-                    wireless.dhcpStop(function() {
-                        console.log("DHCP has been turned off. Leaving the network...");
+_init();
 
-                        wireless.leave();
-                    });
-                }, 20 * 1000);
-            });
-        });
+
+
+var killing_app = false;
+process.on('SIGINT', function() {
+    console.log("\n");
+
+    if (killing_app) {
+        console.log("[PROGRESS] Double SIGINT, Killing without cleanup!");
+        process.exit();
     }
+
+    killing_app = true;
+    console.log("[PROGRESS] Gracefully shutting down from SIGINT (Ctrl+C)");
+    console.log("[PROGRESS] Disabling Adapter...");
+
+    wireless.disable(function() {
+        console.log("[PROGRESS] Stopping and Exiting...");
+
+        wireless.stop();
+    });
+
+    bleno.stopAdvertising();
 });
-
-// A network disappeared (after the specified threshold)
-wireless.on('vanish', function(network) {
-    console.log("[  VANISH] " + network.ssid + " [" + network.address + "] ");
-});
-
-// A wireless network changed something about itself
-wireless.on('change', function(network) {
-    console.log("[  CHANGE] " + network.ssid);
-});
-
-wireless.on('signal', function(network) {
-    console.log("[  SIGNAL] " + network.ssid);
-});
-
-// We've joined a network
-wireless.on('join', function(network) {
-    console.log("[    JOIN] " + network.ssid + " [" + network.address + "] ");
-});
-
-// You were already connected, so it's not technically a join event...
-wireless.on('former', function(address) {
-    console.log("[OLD JOIN] " + address);
-});
-
-// We've left a network
-wireless.on('leave', function() {
-    console.log("[   LEAVE] Left the network");
-});
-
-// Just for debugging purposes
-wireless.on('command', function(command) {
-    console.log("[ COMMAND] " + command);
-});
-
-wireless.on('dhcp', function(ip_address) {
-    console.log("[    DHCP] Leased IP " + ip_address);
-});
-
-/*
-wireless.on('batch', function(networks) {
-    console.log("[   BATCH] " + networks);
-});
-*/
-
-wireless.on('empty', function() {
-    console.log("[   EMPTY] Found no networks this scan");
-});
-
-wireless.on('error', function(message) {
-    console.log("[   ERROR] " + message);
-});
-
-var connected = new Promise(function(resolve, reject){
-    require('dns').lookup('google.com', function(error) {
-        if(error && error.code == "ENOTFOUND"){
-            reject();
-        }else{
-            resolve();
-        }
-    })
-});
-
-// example usage:
-connected.then(function(){
-        console.log(ip.address());
-    }, 
-    function(){
-        console.log("whaaaat?");
-        // start bleno
-    }
-);
-
